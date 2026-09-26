@@ -63,18 +63,37 @@ during that window.
 This 2-byte `aconst_null putstatic` sequence occurs exactly once in the
 whole class file, confirmed before patching.
 
+Second patch (Moonlight 4.1.0+, added 2026-09-26): 4.1.0 adds a mixin on
+`Identifier.<init>` (`ResourceLocationMixin.moonlight$validateValidNamespace`)
+that throws "Some mod disabled vanilla id validation ... This is VERY BAD!"
+whenever an Identifier with an invalid namespace is built, and
+`Moonlight.commonInit` parses "#invalid:ResourceLocation" on purpose to trip
+it at startup. AAA Particles (needed by Archaion) @Overwrites
+`Identifier.isValidNamespace` to always return true, so the server crashed at
+boot. No config switch exists. The handler body is
+
+    aload_1; aload_2; invokestatic ResourceLocationSanityCheck.validateNamespace(String,String)V; return
+
+and NOPing the first three (5 bytes) is stack-neutral, leaving `return`. This
+restores 4.0.8's behaviour exactly (4.0.8 had no such check). Skipped with a
+note when the class isn't present (older Moonlight).
+
 Usage:
     python3 patch.py <input jar> <output jar>
 """
-import subprocess
 import sys
-import tempfile
 import zipfile
 from pathlib import Path
 
-CLASS_PATH = "net/mehvahdjukaar/moonlight/platform/MoonlightFabric.class"
-# aconst_null (0x01), putstatic #192 (0xB3 0x00 0xC0)
-PATTERN = bytes([0x01, 0xB3, 0x00, 0xC0])
+# (class, pattern, replacement, required)
+PATCHES = [
+    # aconst_null (0x01), putstatic #192 (0xB3 0x00 0xC0) -> 4x nop
+    ("net/mehvahdjukaar/moonlight/platform/MoonlightFabric.class",
+     bytes([0x01, 0xB3, 0x00, 0xC0]), bytes(4), True),
+    # aload_1, aload_2, invokestatic #7, return -> 5x nop, return
+    ("net/mehvahdjukaar/moonlight/core/mixins/ResourceLocationMixin.class",
+     bytes([0x2B, 0x2C, 0xB8, 0x00, 0x07, 0xB1]), bytes(5) + b"\xB1", False),
+]
 
 
 def main():
@@ -83,32 +102,28 @@ def main():
         sys.exit(1)
     src_jar, dst_jar = Path(sys.argv[1]), Path(sys.argv[2])
 
-    with zipfile.ZipFile(src_jar) as zf:
-        class_bytes = bytearray(zf.read(CLASS_PATH))
+    with zipfile.ZipFile(src_jar) as zin:
+        names = set(zin.namelist())
+        patched = {}
+        for cls, pattern, repl, required in PATCHES:
+            if cls not in names:
+                if required:
+                    raise SystemExit(f"{cls} missing from the jar.")
+                print(f"skip: {cls} not in this Moonlight version")
+                continue
+            data = zin.read(cls)
+            n = data.count(pattern)
+            if n != 1:
+                raise SystemExit(
+                    f"Expected exactly one match in {cls}, found {n} -- mod was likely "
+                    "recompiled/updated, re-derive with `javap -p -c -constants`.")
+            patched[cls] = data.replace(pattern, repl)
+            print(f"patched: {cls}")
+        with zipfile.ZipFile(dst_jar, "w", zipfile.ZIP_DEFLATED) as zout:
+            for info in zin.infolist():
+                zout.writestr(info, patched.get(info.filename, zin.read(info.filename)))
 
-    idx = class_bytes.find(PATTERN)
-    if idx == -1:
-        raise SystemExit(
-            f"Expected byte pattern not found in {CLASS_PATH} -- "
-            "mod was likely recompiled/updated, re-derive the offset "
-            "with `javap -p -c -constants` before patching a new jar."
-        )
-    if class_bytes.count(PATTERN) != 1:
-        raise SystemExit("Pattern is not unique in the class file, refusing to guess.")
-
-    for i in range(idx, idx + 4):
-        class_bytes[i] = 0x00
-
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-        class_dir = tmp / "net/mehvahdjukaar/moonlight/platform"
-        class_dir.mkdir(parents=True)
-        (class_dir / "MoonlightFabric.class").write_bytes(class_bytes)
-
-        dst_jar.write_bytes(src_jar.read_bytes())
-        subprocess.run(["zip", str(dst_jar.resolve()), CLASS_PATH], cwd=tmp, check=True)
-
-    print(f"Patched {dst_jar}")
+    print(f"Wrote {dst_jar}")
 
 
 if __name__ == "__main__":

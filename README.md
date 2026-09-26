@@ -1,7 +1,7 @@
 # Moonlight Shutdown Save Fix
 
 Bytecode patch for [Moonlight](https://modrinth.com/mod/moonlight)
-(`fabric 26.1/mods/moonlight-26.1.2-4.0.8-fabric.jar`), fixing a real `/stop`
+(`fabric 26.1/mods/moonlight-26.1.2-4.1.0-fabric.jar` as of 2026-09-26; was 4.0.8), fixing a real `/stop`
 crash that hits any world with Create's Train module loaded, station placed
 or not.
 
@@ -99,3 +99,24 @@ shutdown (`ThreadedAnvilChunkStorage: All dimensions are saved`, no
 `UnsupportedOperationException`, no "Exception stopping the server").
 Deployed to both the server's `mods/` and the local test instance's merged
 `mods/` folder.
+
+## Second patch: Moonlight 4.1.0's id sanity check (2026-09-26)
+
+Moonlight 4.1.0 (needed by Haunted Harvest 4.0.3) adds a mixin on
+`Identifier.<init>` that throws "Invalid ResourceLocation namespace ... Some mod
+disabled vanilla id validation ... This is VERY BAD!" and trips it on purpose at
+startup (`Moonlight.commonInit` parses `#invalid:ResourceLocation`). AAA Particles
+2.2.3 (required by Archaion, no newer 26.1.2 build) `@Overwrite`s
+`Identifier.isValidNamespace` to always return `true`, so the server crashed during
+Moonlight's init. There's no config switch.
+
+`patch.py` now also NOPs the handler's `aload_1; aload_2; invokestatic
+validateNamespace` (5 bytes, stack-neutral, leaves `return`). That's exactly 4.0.8's
+behaviour, which had no check. The shutdown fix is still needed in 4.1.0 (same
+`aconst_null; putstatic currentServer`, same constant-pool index). Both patches are
+checked for exactly one match; the second is skipped on Moonlight versions without
+the class. Verified by a full local boot with Haunted Harvest, Spyglass Astronomy Sync,
+and every other Moonlight dependent (Dummmmmmy, Fast Paintings).
+
+Retest both patches whenever Moonlight or AAA Particles updates; drop the second one
+if AAA Particles stops relaxing id validation.
