@@ -85,14 +85,17 @@ import sys
 import zipfile
 from pathlib import Path
 
-# (class, pattern, replacement, required)
+# (class, [(pattern, replacement), ...], required). Each entry lists the known builds'
+# byte patterns (the constant-pool index shifts between releases); exactly one must match.
 PATCHES = [
-    # aconst_null (0x01), putstatic #192 (0xB3 0x00 0xC0) -> 4x nop
+    # aconst_null (0x01), putstatic currentServer -> 4x nop.
+    # #192 (0x00C0) in 4.1.0, #193 (0x00C1) in 4.1.1.
     ("net/mehvahdjukaar/moonlight/platform/MoonlightFabric.class",
-     bytes([0x01, 0xB3, 0x00, 0xC0]), bytes(4), True),
+     [(bytes([0x01, 0xB3, 0x00, 0xC0]), bytes(4)),
+      (bytes([0x01, 0xB3, 0x00, 0xC1]), bytes(4))], True),
     # aload_1, aload_2, invokestatic #7, return -> 5x nop, return
     ("net/mehvahdjukaar/moonlight/core/mixins/ResourceLocationMixin.class",
-     bytes([0x2B, 0x2C, 0xB8, 0x00, 0x07, 0xB1]), bytes(5) + b"\xB1", False),
+     [(bytes([0x2B, 0x2C, 0xB8, 0x00, 0x07, 0xB1]), bytes(5) + b"\xB1")], False),
 ]
 
 
@@ -105,18 +108,19 @@ def main():
     with zipfile.ZipFile(src_jar) as zin:
         names = set(zin.namelist())
         patched = {}
-        for cls, pattern, repl, required in PATCHES:
+        for cls, variants, required in PATCHES:
             if cls not in names:
                 if required:
                     raise SystemExit(f"{cls} missing from the jar.")
                 print(f"skip: {cls} not in this Moonlight version")
                 continue
             data = zin.read(cls)
-            n = data.count(pattern)
-            if n != 1:
+            hits = [(pat, rep) for pat, rep in variants if data.count(pat) == 1]
+            if len(hits) != 1 or sum(data.count(pat) for pat, _ in variants) != 1:
                 raise SystemExit(
-                    f"Expected exactly one match in {cls}, found {n} -- mod was likely "
-                    "recompiled/updated, re-derive with `javap -p -c -constants`.")
+                    f"Expected exactly one known pattern in {cls}, found none or several -- mod "
+                    "was likely recompiled/updated, re-derive with `javap -p -c -constants`.")
+            pattern, repl = hits[0]
             patched[cls] = data.replace(pattern, repl)
             print(f"patched: {cls}")
         with zipfile.ZipFile(dst_jar, "w", zipfile.ZIP_DEFLATED) as zout:
